@@ -25,7 +25,7 @@ def jadx_apk(apk_file, output_dir):
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         # Run the jadx command from __file__ directory/jadx-1.5.1/bin/jadx
-        os.system(f"{os.path.dirname(os.path.realpath(__file__))}/jadx-1.5.1/bin/jadx -d {output_dir} -e {apk_file}")
+        os.system(f"jadx -d {output_dir} -e {apk_file}")
 
 
 def tar_xf(tar_file, output_dir):
