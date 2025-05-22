@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import zlib
+import argparse
 from functools import cache
 
 
@@ -89,21 +90,13 @@ def get_all_files(dir):
     return files
 
 
-def get_changes(old_dir, new_dir):
+def get_files(old_dir):
     old_files_dict = get_all_files(old_dir) if old_dir else {}
-    new_files_dict = get_all_files(new_dir) if new_dir else {}
     # Changes is a list of tuples (filename, type [changed (aka size differs), added, deleted])
-    changes = []
+    files = []
     for file in old_files_dict:
-        if file not in new_files_dict:
-            changes.append((file, 'deleted'))
-        elif old_files_dict[file] != new_files_dict[file]:
-            changes.append((file, 'changed'))
-    for file in new_files_dict:
-        if file not in old_files_dict:
-            changes.append((file, 'added'))
-    
-    return changes
+        files.append(file)
+    return sorted(files)
 
 
 @cache
@@ -119,7 +112,7 @@ def is_readable_file(file):
 
 def skip_file(file):
     # Check if the file is a known file to skip
-    if file.endswith(".java") and "com/winlator" not in file:
+    if file.endswith(".java") and ("androidx/" in file or "com/google/" in file or "com/android/" in file or "org/apache/" in file or "org/tukaani/" in file):
         return True
     if file.endswith(".xml") and "src/main/res" in file:
         return True
@@ -137,56 +130,69 @@ def skip_file(file):
     return False
 
 
-def print_changes(old_dir, new_dir):
-    changes = get_changes(old_dir, new_dir)
-    if not changes:
-        print("    No changes found")
+def is_src_file(file):
+    return file.endswith(".java") or file.endswith(".c") or file.endswith(".cpp") or file.endswith(".h") or file.endswith(".hpp")
+
+
+def print_files(old_dir, args):
+    files = get_files(old_dir)
+    if not files:
+        print("    No files found")
         return []
     next_files = []
-    for (file, change) in changes:
-        if change == 'changed':
-            # Now exec the command to get the diff
-            # Old will be bruno/{file} and new will be omod/{file}
-            print(f"  ~ {file}: {change}")
-            if skip_file(file):
-                continue
-            if "usr/share" in file:
-                continue
-            if is_readable_file(f'{old_dir}/{file}') and is_readable_file(f'{new_dir}/{file}'):
-                if file.endswith(".java") or file.endswith(".cpp") or file.endswith(".c") or file.endswith(".h") or file.endswith(".xml"):
-                    popen = os.popen(f"diff -u '{old_dir}/{file}' '{new_dir}/{file}'")
-                    for line in popen.readlines():
-                        print("    " + line.rstrip())
-                else:
-                    popen = os.popen(f"diff -u '{old_dir}/{file}' '{new_dir}/{file}'")
-                    for line in popen.readlines():
-                        print("    " + line.rstrip())
-        elif change == 'added':
-            print(f"  + {file}: {change} (added)")
-            if skip_file(file):
-                continue
-            try:
-                limit = 5
-                if file.endswith(".java"):
-                    limit = 100
-                with open(f'{new_dir}/{file}', "r") as f:
-                    for i, l in enumerate(f):
-                        if i > limit:
-                            print("    ", "...")
-                            break
-                        print("    " + l.rstrip())
-            except:
-                pass # Fond non-text data
-        elif change == 'deleted':
-            print(f"  - {file}: {change} (deleted)")
-        
-        if file.endswith(".tzst") or file.endswith(".txz") or file.endswith(".apk") or file.endswith(".zip"):
+    for file in files:
+        print(f"  + {file}")
+
+        if file.endswith(".tzst") or file.endswith(".txz") or file.endswith(".apk") or file.endswith(".zip") or file.endswith(".jar"):
             # Add the file to the next_files list
             next_files.append(file)
+        if skip_file(file):
+            continue
+        
+        if not is_readable_file(f'{old_dir}/{file}'):
+            if args.nm and (file.endswith(".so") or file.endswith(".a") or file.endswith(".o")):
+                # Use nm to get the symbols
+                popen = os.popen(f"nm -gDCU {old_dir}/{file}")
+                for line in popen.readlines():
+                    print("    " + line.rstrip())
+            if args.objdump and (file.endswith(".so") or file.endswith(".a") or file.endswith(".o")):
+                # Use objdump to get the symbols
+                popen = os.popen(f"objdump -x {old_dir}/{file}")
+                for line in popen.readlines():
+                    print("    " + line.rstrip())
+            if args.disassemble and (file.endswith(".so") or file.endswith(".a") or file.endswith(".o")):
+                # Check to see if objdump is installed
+                has_objdump = os.system("which objdump > /dev/null") == 0
+                has_aarch64_objdump = os.system("which aarch64-linux-gnu-objdump > /dev/null") == 0 or os.system("which aarch64-w64-mingw32-objdump > /dev/null") == 0
+                # Check if the file is a x86_64 or aarch64 file
+                is_x86_64 = os.system(f"file {old_dir}/{file} | grep -q 'x86-64' > /dev/null") == 0
+                # Use objdump to get the symbols
+                if has_objdump and is_x86_64:
+                    popen = os.popen(f"objdump -D -j .text {old_dir}/{file}")
+                elif has_aarch64_objdump:
+                    popen = os.popen(f"aarch64-linux-gnu-objdump -D -j .text {old_dir}/{file}")
+                
+                for line in popen.readlines():
+                    print("    " + line.rstrip())
+            continue
+
+        try:
+            file_limit = args.limit
+            if is_src_file(file):
+                file_limit = 5000 # Keep a higher limit for source files by default
+            with open(f'{old_dir}/{file}', "r") as f:
+                for i, l in enumerate(f):
+                    if i > file_limit:
+                        print("    ", "... (truncated) ...")
+                        break
+                    print("    " + l.rstrip())
+        except:
+            pass # Found non-text data
+        
     return next_files
 
 
-def compare_files(old_file, new_file):
+def analyze_files(old_file, args):
     # Get the checksum of the old and new files
     try:
         old_dir = get_staging_dir(old_file)
@@ -203,12 +209,9 @@ def compare_files(old_file, new_file):
                 old_dir = get_staging_dir(old_file)
         else:
             old_dir = None
-    try:
-        new_dir = get_staging_dir(new_file)
-    except:
-        new_dir = None
-    print(f"# Processing files: {old_file if old_dir else "N/A"} vs {new_file if new_dir else "N/A"}")
-    print(f"  Staging directories: {old_dir if old_dir else 'N/A'} vs {new_dir if new_dir else 'N/A'}")
+    
+    print(f"# Processing files: {old_file if old_dir else "N/A"}")
+    print(f"  Staging directories: {old_dir if old_dir else 'N/A'}")
 
     # Uncompress the files
     if old_file and os.path.isdir(old_file):
@@ -223,33 +226,34 @@ def compare_files(old_file, new_file):
     elif old_dir:
         tar_xf(old_file, old_dir)
 
-
-    if new_file and os.path.isdir(new_file):
-        # symlink the directory to the staging dir
-        os.system(f"ln -s {new_file} {new_dir}")
-    elif new_dir and new_file.endswith(".apk"):
-        jadx_apk(new_file, new_dir)
-    elif new_dir and new_file.endswith(".zip"):
-        unzip(new_file, new_dir)
-    elif new_dir and new_file.endswith(".jar"):
-        jd_jar(new_file, new_dir)
-    elif new_dir:
-        tar_xf(new_file, new_dir)
-    
     # Get the changes
-    next_files = print_changes(old_dir, new_dir)
+    next_files = print_files(old_dir, args)
     for file in next_files:
         print(f"  Processing file: {file}")
-        compare_files(old_dir + "/" + file if old_dir else None, new_dir + "/" + file if new_dir else None)
+        analyze_files(old_dir + "/" + file if old_dir else None, args)
 
 
 if __name__ == "__main__":
-    old_apk = os.path.abspath(sys.argv[1])
-    new_apk = os.path.abspath(sys.argv[2])
+    parser = argparse.ArgumentParser(description='Analyze APKs or directories.')
+    parser.add_argument('apk_file', help='The APK file or directory to analyze.')
+    parser.add_argument('--nm', action='store_true', help='Enable nm for .so files.')
+    parser.add_argument('--objdump', action='store_true', help='Enable objdump -x for .so files.')
+    parser.add_argument('--disassemble', action='store_true', help='Enable disassembly for .so files.')
+    parser.add_argument('-l', '--limit', type=int, default=20, help='Limit the number of lines printed per file.')
+    parser.add_argument('-w', '--working-dir', type=str, default=None, help='Disable verbose output.')
+    args = parser.parse_args()
 
-    staging_dir = os.path.dirname(os.path.realpath(__file__)) + "/compare_changes"
-    if not os.path.exists(staging_dir):
-        os.makedirs(staging_dir)
-    os.chdir(staging_dir)
+    apk_file = os.path.abspath(args.apk_file)
 
-    compare_files(old_apk, new_apk)
+    if args.working_dir:
+        working_dir = os.path.abspath(args.working_dir)
+        if not os.path.exists(working_dir):
+            os.makedirs(working_dir)
+    else:
+        working_dir = os.path.dirname(os.path.realpath(__file__)) + "/analyze_winlator"
+    if not os.path.exists(working_dir):
+        os.makedirs(working_dir)
+
+    os.chdir(working_dir)
+
+    analyze_files(apk_file, args)

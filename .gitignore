@@ -10,4 +10,8 @@ env.bak/
 venv.bak/
 
 workdir/
+analyze_winlator/
+docs/
 *.apk
+uv.lock
+.python-version
